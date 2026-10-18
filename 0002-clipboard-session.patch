@@ -272,7 +272,7 @@ index 000000000..d297e0bec
 +}
 +
 diff --git a/core/internal/server/clipboard/manager.go b/core/internal/server/clipboard/manager.go
-index 0eb0c353b..1a8c13197 100644
+index 0eb0c353b..7f940b726 100644
 --- a/core/internal/server/clipboard/manager.go
 +++ b/core/internal/server/clipboard/manager.go
 @@ -2,6 +2,7 @@ package clipboard
@@ -355,7 +355,20 @@ index 0eb0c353b..1a8c13197 100644
  func openDB(path string) (*bolt.DB, error) {
  	db, err := tryOpenDB(path)
  	if err == nil {
-@@ -1183,7 +1237,21 @@ func (m *Manager) TouchEntry(id uint64) error {
+@@ -1043,6 +1097,12 @@ func (m *Manager) GetHistory() []Entry {
+ 		go m.deleteStaleEntries(stale)
+ 	}
+ 
++	// Newest first by timestamp, not by key: TouchEntry rewrites a row in place
++	// to keep its id stable for the UI, so key order no longer tracks recency.
++	slices.SortFunc(history, func(a, b Entry) int {
++		return b.Timestamp.Compare(a.Timestamp)
++	})
++
+ 	return history
+ }
+ 
+@@ -1183,7 +1243,21 @@ func (m *Manager) TouchEntry(id uint64) error {
  
  	entry.Timestamp = time.Now()
  
@@ -378,7 +391,7 @@ index 0eb0c353b..1a8c13197 100644
  		return err
  	}
  
-@@ -1379,74 +1447,21 @@ func (m *Manager) SetClipboardEntry(entry *Entry) error {
+@@ -1379,74 +1453,21 @@ func (m *Manager) SetClipboardEntry(entry *Entry) error {
  	return nil
  }
  
@@ -407,10 +420,7 @@ index 0eb0c353b..1a8c13197 100644
 -		}
 -
 -		dataMgr := m.dataControlMgr.(*ext_data_control.ExtDataControlManagerV1)
-+	m.ownerLock.Lock()
-+	cs := m.session
-+	m.ownerLock.Unlock()
- 
+-
 -		source, err := dataMgr.CreateDataSource()
 -		if err != nil {
 -			log.Errorf("Failed to create data source: %v", err)
@@ -425,7 +435,10 @@ index 0eb0c353b..1a8c13197 100644
 -			}
 -			offerData[offer.MimeType] = offer.Data
 -		}
--
++	m.ownerLock.Lock()
++	cs := m.session
++	m.ownerLock.Unlock()
+ 
 -		source.SetSendHandler(func(e ext_data_control.ExtDataControlSourceV1SendEvent) {
 -			data, ok := offerData[e.MimeType]
 -			if !ok {
@@ -463,7 +476,7 @@ index 0eb0c353b..1a8c13197 100644
  }
  
  func (m *Manager) CopyText(text string) error {
-@@ -1504,6 +1519,11 @@ func (m *Manager) Close() {
+@@ -1504,6 +1525,11 @@ func (m *Manager) Close() {
  	m.alive = false
  	close(m.stopChan)
  

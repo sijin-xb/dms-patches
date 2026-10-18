@@ -27,6 +27,8 @@ DMS 的音量滑块在 10% 时实际输出 -60 dB，几乎无声。原因是 qui
 
 同时修复 `TouchEntry` 的既有缺陷：它原先走 `storeEntry`，会去重并分配新序号，导致「从面板选一条历史 → ID 立刻失效 → 粘贴出来还是旧内容」。现在原地更新，ID 保持不变。
 
+`GetHistory` 随之改为按时间戳排序。它原本依赖 key 顺序（即序号）来体现新旧，原地更新后序号不再变化，面板第一条就不会是你刚选中的那条。
+
 涉及文件：`core/internal/clipboard/{clipboard,session}.go`、`core/internal/server/clipboard/{manager,types}.go`。
 
 ## 应用
