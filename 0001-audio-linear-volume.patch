@@ -1,0 +1,255 @@
+diff --git a/quickshell/DMSShellIPC.qml b/quickshell/DMSShellIPC.qml
+index f68da0d91..e2307c2a3 100644
+--- a/quickshell/DMSShellIPC.qml
++++ b/quickshell/DMSShellIPC.qml
+@@ -2123,7 +2123,7 @@ Item {
+                 return "No audio source available";
+             }
+ 
+-            const volume = Math.round(AudioService.source.audio.volume * 100);
++            const volume = Math.round(AudioService.percentFromVolume(AudioService.source.audio.volume));
+             const muteStatus = AudioService.source.audio.muted ? " (muted)" : "";
+             return `Microphone: ${volume}%${muteStatus}`;
+         }
+diff --git a/quickshell/Modules/ControlCenter/Widgets/AudioDeviceTile.qml b/quickshell/Modules/ControlCenter/Widgets/AudioDeviceTile.qml
+index 8f38e4a6c..224e9442f 100644
+--- a/quickshell/Modules/ControlCenter/Widgets/AudioDeviceTile.qml
++++ b/quickshell/Modules/ControlCenter/Widgets/AudioDeviceTile.qml
+@@ -39,12 +39,12 @@ CcTile {
+                 anchors.verticalCenter: parent.verticalCenter
+                 width: Math.min(parent.width, parent.height)
+                 height: width
+-                value: root.audio ? Math.min(1, root.audio.volume * 100 / root.maxVolume) : -1
++                value: root.audio ? Math.min(1, AudioService.percentFromVolume(root.audio.volume) / root.maxVolume) : -1
+                 ringColor: root.active ? Theme.primary : Theme.surfaceVariantText
+ 
+                 StyledText {
+                     anchors.centerIn: parent
+-                    text: root.audio ? Math.round(root.audio.volume * 100) + "%" : "--"
++                    text: root.audio ? Math.round(AudioService.percentFromVolume(root.audio.volume)) + "%" : "--"
+                     font.pixelSize: Theme.fontSizeSmall
+                     font.weight: Theme.fontWeightMedium
+                     color: root.contentColor
+@@ -61,10 +61,10 @@ CcTile {
+     onWheel: wheelEvent => {
+         if (!audio)
+             return;
+-        const current = audio.volume * 100;
++        const current = AudioService.percentFromVolume(audio.volume);
+         const step = wheelEvent.angleDelta.y > 0 ? AudioService.wheelVolumeStep : -AudioService.wheelVolumeStep;
+         audio.muted = false;
+-        audio.volume = Math.max(0, Math.min(maxVolume, current + step)) / 100;
++        audio.volume = AudioService.volumeFromPercent(Math.max(0, Math.min(maxVolume, current + step)));
+         wheelEvent.accepted = true;
+     }
+     expandedContent: Component {
+diff --git a/quickshell/Modules/ControlCenter/Widgets/AudioSliderRow.qml b/quickshell/Modules/ControlCenter/Widgets/AudioSliderRow.qml
+index 7bfbb8e6e..95ae3a40d 100644
+--- a/quickshell/Modules/ControlCenter/Widgets/AudioSliderRow.qml
++++ b/quickshell/Modules/ControlCenter/Widgets/AudioSliderRow.qml
+@@ -11,7 +11,7 @@ CcSliderRow {
+     property bool playFeedback: false
+ 
+     readonly property var audio: node?.audio ?? null
+-    readonly property real volumePercent: audio ? Math.round(audio.volume * 100) : 0
++    readonly property real volumePercent: audio ? Math.round(AudioService.percentFromVolume(audio.volume)) : 0
+     readonly property bool audible: !!audio && !audio.muted && audio.volume > 0
+ 
+     iconName: {
+@@ -38,7 +38,7 @@ CcSliderRow {
+         if (!audio)
+             return;
+         SessionData.suppressOSDTemporarily();
+-        audio.volume = newValue / 100;
++        audio.volume = AudioService.volumeFromPercent(newValue);
+         if (newValue > 0 && audio.muted)
+             audio.muted = false;
+         if (playFeedback)
+diff --git a/quickshell/Modules/DBar/Widgets/ControlCenterButton.qml b/quickshell/Modules/DBar/Widgets/ControlCenterButton.qml
+index d43789ed9..d215d5ec9 100644
+--- a/quickshell/Modules/DBar/Widgets/ControlCenterButton.qml
++++ b/quickshell/Modules/DBar/Widgets/ControlCenterButton.qml
+@@ -217,10 +217,10 @@ BasePill {
+         }
+ 
+         const maxVol = AudioService.sinkMaxVolume;
+-        const currentVolume = AudioService.sink.audio.volume * 100;
++        const currentVolume = AudioService.percentFromVolume(AudioService.sink.audio.volume);
+         const newVolume = delta > 0 ? Math.min(maxVol, currentVolume + step) : Math.max(0, currentVolume - step);
+         AudioService.sink.audio.muted = false;
+-        AudioService.sink.audio.volume = newVolume / 100;
++        AudioService.sink.audio.volume = AudioService.volumeFromPercent(newVolume);
+         AudioService.playVolumeChangeSoundIfEnabled();
+     }
+ 
+@@ -240,10 +240,10 @@ BasePill {
+             micAccumulator = 0;
+         }
+ 
+-        const currentVolume = AudioService.source.audio.volume * 100;
++        const currentVolume = AudioService.percentFromVolume(AudioService.source.audio.volume);
+         const newVolume = delta > 0 ? Math.min(100, currentVolume + step) : Math.max(0, currentVolume - step);
+         AudioService.source.audio.muted = false;
+-        AudioService.source.audio.volume = newVolume / 100;
++        AudioService.source.audio.volume = AudioService.volumeFromPercent(newVolume);
+         AudioService.micVolumeChanged();
+     }
+ 
+diff --git a/quickshell/Modules/OSD/MicVolumeOSD.qml b/quickshell/Modules/OSD/MicVolumeOSD.qml
+index 7a7bedd2f..39c7209ba 100644
+--- a/quickshell/Modules/OSD/MicVolumeOSD.qml
++++ b/quickshell/Modules/OSD/MicVolumeOSD.qml
+@@ -32,7 +32,7 @@ LevelOSD {
+     onIconClicked: AudioService.toggleMicMute()
+     onLevelRequested: level => {
+         SessionData.suppressOSDTemporarily();
+-        audio.volume = level / 100;
++        audio.volume = AudioService.volumeFromPercent(level);
+     }
+ 
+     Connections {
+diff --git a/quickshell/Modules/OSD/VolumeOSD.qml b/quickshell/Modules/OSD/VolumeOSD.qml
+index 736bc7ebb..66a49cfb8 100644
+--- a/quickshell/Modules/OSD/VolumeOSD.qml
++++ b/quickshell/Modules/OSD/VolumeOSD.qml
+@@ -30,7 +30,7 @@ LevelOSD {
+     onIconClicked: AudioService.toggleMute()
+     onLevelRequested: level => {
+         SessionData.suppressOSDTemporarily();
+-        audio.volume = level / 100;
++        audio.volume = AudioService.volumeFromPercent(level);
+     }
+ 
+     Connections {
+diff --git a/quickshell/Services/AudioService.qml b/quickshell/Services/AudioService.qml
+index 53a1d8688..5690f96ca 100644
+--- a/quickshell/Services/AudioService.qml
++++ b/quickshell/Services/AudioService.qml
+@@ -148,10 +148,22 @@ Singleton {
+         return SessionData.deviceMaxVolumes[name] ?? 100;
+     }
+ 
+-    readonly property int sinkVolumePercent: Math.min(sinkMaxVolume, Math.round((sink?.audio?.volume ?? 0) * 100))
+-    readonly property int sourceVolumePercent: Math.round((source?.audio?.volume ?? 0) * 100)
++    readonly property int sinkVolumePercent: Math.min(sinkMaxVolume, Math.round(root.percentFromVolume(sink?.audio?.volume ?? 0)))
++    readonly property int sourceVolumePercent: Math.round(root.percentFromVolume(source?.audio?.volume ?? 0))
+     readonly property int wheelVolumeStep: SettingsData.audioWheelScrollAmount
+ 
++    // quickshell cubes the volume before writing it to PipeWire, so a UI value of
++    // 0.5 lands as -18 dB instead of -6 dB. These invert that so the slider maps
++    // linearly onto the stored gain.
++    function volumeFromPercent(percent) {
++        const linear = Math.max(0, Math.min(1, percent / 100));
++        return Math.cbrt(linear);
++    }
++
++    function percentFromVolume(volume) {
++        return Math.pow(volume, 3) * 100;
++    }
++
+     property bool monoSettingSupported: false
+     property string monoSettingBackend: ""
+ 
+@@ -176,9 +188,9 @@ Singleton {
+             if (!root.sink?.audio)
+                 return;
+             const maxVol = root.sinkMaxVolume;
+-            const currentPercent = Math.round(root.sink.audio.volume * 100);
++            const currentPercent = Math.round(root.percentFromVolume(root.sink.audio.volume));
+             if (currentPercent > maxVol)
+-                root.sink.audio.volume = maxVol / 100;
++                root.sink.audio.volume = root.volumeFromPercent(maxVol);
+         }
+     }
+ 
+@@ -1625,7 +1637,7 @@ EOFCONFIG
+         const maxVol = root.sinkMaxVolume;
+         const clampedVolume = Math.max(0, Math.min(maxVol, percentage));
+         root.sinkVolumeWrites = [];
+-        root.sink.audio.volume = clampedVolume / 100;
++        root.sink.audio.volume = root.volumeFromPercent(clampedVolume);
+         return `Volume set to ${clampedVolume}%`;
+     }
+ 
+@@ -1646,7 +1658,7 @@ EOFCONFIG
+         function onVolumeChanged() {
+             if (root.writingSinkVolume || root.sinkVolumeWrites.length === 0)
+                 return;
+-            const idx = root.sinkVolumeWrites.indexOf(Math.round(root.sink.audio.volume * 100));
++            const idx = root.sinkVolumeWrites.indexOf(Math.round(root.percentFromVolume(root.sink.audio.volume)));
+             root.sinkVolumeWrites = idx < 0 ? [] : root.sinkVolumeWrites.slice(idx + 1);
+         }
+     }
+@@ -1656,7 +1668,7 @@ EOFCONFIG
+         const maxVol = root.sinkMaxVolume;
+         const stepValue = outputVolumeStep(step);
+         const pending = root.sinkVolumeWrites;
+-        const currentVolume = pending.length > 0 ? pending[pending.length - 1] : Math.round(audio.volume * 100);
++        const currentVolume = pending.length > 0 ? pending[pending.length - 1] : Math.round(root.percentFromVolume(audio.volume));
+         const newVolume = Math.max(0, Math.min(maxVol, currentVolume + direction * stepValue));
+ 
+         if (audio.muted)
+@@ -1666,7 +1678,7 @@ EOFCONFIG
+             return newVolume;
+ 
+         root.writingSinkVolume = true;
+-        audio.volume = newVolume / 100;
++        audio.volume = root.volumeFromPercent(newVolume);
+         root.writingSinkVolume = false;
+         root.sinkVolumeWrites = pending.concat([newVolume]).slice(-8);
+         return newVolume;
+@@ -1759,7 +1771,7 @@ EOFCONFIG
+         }
+ 
+         const clampedVolume = Math.max(0, Math.min(100, percentage));
+-        root.source.audio.volume = clampedVolume / 100;
++        root.source.audio.volume = root.volumeFromPercent(clampedVolume);
+         micVolumeChanged();
+         return `Microphone volume set to ${clampedVolume}%`;
+     }
+@@ -1780,11 +1792,11 @@ EOFCONFIG
+         if (root.source.audio.muted)
+             root.source.audio.muted = false;
+ 
+-        const currentVolume = Math.round(root.source.audio.volume * 100);
++        const currentVolume = Math.round(root.percentFromVolume(root.source.audio.volume));
+         const stepValue = parseInt(step || "5");
+         const newVolume = Math.max(0, Math.min(100, currentVolume + stepValue));
+ 
+-        root.source.audio.volume = newVolume / 100;
++        root.source.audio.volume = root.volumeFromPercent(newVolume);
+         micVolumeChanged();
+         return `Microphone volume increased to ${newVolume}%`;
+     }
+@@ -1796,11 +1808,11 @@ EOFCONFIG
+         if (root.source.audio.muted)
+             root.source.audio.muted = false;
+ 
+-        const currentVolume = Math.round(root.source.audio.volume * 100);
++        const currentVolume = Math.round(root.percentFromVolume(root.source.audio.volume));
+         const stepValue = parseInt(step || "5");
+         const newVolume = Math.max(0, Math.min(100, currentVolume - stepValue));
+ 
+-        root.source.audio.volume = newVolume / 100;
++        root.source.audio.volume = root.volumeFromPercent(newVolume);
+         micVolumeChanged();
+         return `Microphone volume decreased to ${newVolume}%`;
+     }
+@@ -1880,7 +1892,7 @@ EOFCONFIG
+             let result = "Audio Status:\n";
+ 
+             if (root.sink?.audio) {
+-                const volume = Math.round(root.sink.audio.volume * 100);
++                const volume = Math.round(root.percentFromVolume(root.sink.audio.volume));
+                 const muteStatus = root.sink.audio.muted ? " (muted)" : "";
+                 const maxVol = root.sinkMaxVolume;
+                 result += `Output: ${volume}%${muteStatus} (max: ${maxVol}%)\n`;
+@@ -1889,7 +1901,7 @@ EOFCONFIG
+             }
+ 
+             if (root.source?.audio) {
+-                const micVolume = Math.round(root.source.audio.volume * 100);
++                const micVolume = Math.round(root.percentFromVolume(root.source.audio.volume));
+                 const muteStatus = root.source.audio.muted ? " (muted)" : "";
+                 result += `Input: ${micVolume}%${muteStatus}`;
+             } else {
