@@ -19,11 +19,15 @@ DMS 的音量滑块在 10% 时实际输出 -60 dB，几乎无声。原因是 qui
 
 涉及文件：`Services/AudioService.qml`、`DMSShellIPC.qml`、`Modules/OSD/{VolumeOSD,MicVolumeOSD}.qml`、`Modules/ControlCenter/Widgets/{AudioSliderRow,AudioDeviceTile}.qml`、`Modules/DBar/Widgets/ControlCenterButton.qml`。
 
-### 0002 — 剪贴板监听回退
+### 0002 — 剪贴板：独立会话与条目恢复
 
-共享的 `wlcontext` dispatcher 不向 clipboard manager 投递 `ext_data_control` 选区事件，导致剪贴板历史不更新。补丁用独立 wayland 连接监听选区，写入走 `m.db`，避免和守护进程抢 bolt 文件锁。
+共享的 `wlcontext` dispatcher 不向 clipboard manager 投递 `ext_data_control` 选区事件，导致剪贴板历史完全不更新（[#3812](https://github.com/AvengeMedia/DankMaterialShell/issues/3812)）。上游的 `2592e2f33` 修的是发送侧，r574 实测仍然失败。
 
-涉及文件：`core/internal/server/clipboard/{manager,types}.go`。
+补丁新增 `clipboard.Session`：一条长期存在的 wayland 连接，同时负责监听选区变化和接管选区。两个角色放在同一条连接上，`IsOwner()` 才能可靠区分「compositor 回显自己刚设的选区」和「别的应用复制了内容」，否则每次从历史恢复都会被当成新复制记录下来。
+
+同时修复 `TouchEntry` 的既有缺陷：它原先走 `storeEntry`，会去重并分配新序号，导致「从面板选一条历史 → ID 立刻失效 → 粘贴出来还是旧内容」。现在原地更新，ID 保持不变。
+
+涉及文件：`core/internal/clipboard/{clipboard,session}.go`、`core/internal/server/clipboard/{manager,types}.go`。
 
 ## 应用
 

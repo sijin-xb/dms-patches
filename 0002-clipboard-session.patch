@@ -1,0 +1,508 @@
+diff --git a/core/internal/clipboard/clipboard.go b/core/internal/clipboard/clipboard.go
+index c97db73d8..9ebd876ab 100644
+--- a/core/internal/clipboard/clipboard.go
++++ b/core/internal/clipboard/clipboard.go
+@@ -348,3 +348,4 @@ func serveOffers(offers []wlclipboard.Offer, pasteOnce bool) error {
+ func IsImageMimeType(mime string) bool {
+ 	return len(mime) > 6 && mime[:6] == "image/"
+ }
++
+diff --git a/core/internal/clipboard/session.go b/core/internal/clipboard/session.go
+new file mode 100644
+index 000000000..d297e0bec
+--- /dev/null
++++ b/core/internal/clipboard/session.go
+@@ -0,0 +1,258 @@
++package clipboard
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"os"
++	"sync"
++	"syscall"
++	"time"
++
++	"github.com/AvengeMedia/dankgo/wayland/ext_data_control"
++	"github.com/AvengeMedia/dankgo/wlclipboard"
++)
++
++// Session owns one long-lived Wayland connection for everything clipboard
++// related: it observes selection changes and can take the selection itself.
++//
++// Keeping both roles on the same connection is what makes ownership tracking
++// reliable. Two separate connections cannot tell "the compositor echoed our
++// own set_selection" from "some other app copied", so a watcher on its own
++// connection records every restore as a fresh copy and dedupes away the row
++// the panel is about to paste from.
++type Session struct {
++	s      *session
++	device *ext_data_control.ExtDataControlDeviceV1
++
++	offerMutex sync.Mutex
++	offers     map[*ext_data_control.ExtDataControlOfferV1][]string
++
++	sourceMutex sync.Mutex
++	source      *ext_data_control.ExtDataControlSourceV1
++	owning      bool
++
++	writeTimeout time.Duration
++}
++
++// OpenSession connects and binds everything needed to both watch and own the
++// selection. The returned session must be closed by the caller.
++func OpenSession() (*Session, error) {
++	s, err := connectSession()
++	if err != nil {
++		return nil, err
++	}
++
++	mgr, err := s.requireDataControl()
++	if err != nil {
++		s.Close()
++		return nil, err
++	}
++
++	device, err := mgr.GetDataDevice(s.seat)
++	if err != nil {
++		s.Close()
++		return nil, fmt.Errorf("get data device: %w", err)
++	}
++
++	cs := &Session{
++		s:            s,
++		device:       device,
++		offers:       make(map[*ext_data_control.ExtDataControlOfferV1][]string),
++		writeTimeout: 30 * time.Second,
++	}
++
++	device.SetDataOfferHandler(func(e ext_data_control.ExtDataControlDeviceV1DataOfferEvent) {
++		if e.Id == nil {
++			return
++		}
++		cs.offerMutex.Lock()
++		cs.offers[e.Id] = nil
++		cs.offerMutex.Unlock()
++
++		e.Id.SetOfferHandler(func(me ext_data_control.ExtDataControlOfferV1OfferEvent) {
++			cs.offerMutex.Lock()
++			cs.offers[e.Id] = append(cs.offers[e.Id], me.MimeType)
++			cs.offerMutex.Unlock()
++		})
++	})
++
++	s.display.Roundtrip()
++	s.display.Roundtrip()
++
++	return cs, nil
++}
++
++// SetSelectionHandler installs the callback invoked for every selection change
++// the compositor reports. It is not called for selections this session owns.
++func (cs *Session) SetSelectionHandler(fn func(data []byte, mimeType string, mimes []string)) {
++	cs.device.SetSelectionHandler(func(e ext_data_control.ExtDataControlDeviceV1SelectionEvent) {
++		if cs.IsOwner() {
++			return
++		}
++		if e.Id == nil {
++			return
++		}
++
++		cs.offerMutex.Lock()
++		mimes := append([]string(nil), cs.offers[e.Id]...)
++		cs.offerMutex.Unlock()
++
++		mime := selectPreferredMimeType(mimes)
++		if mime == "" {
++			return
++		}
++
++		r, w, err := os.Pipe()
++		if err != nil {
++			return
++		}
++		if err := e.Id.Receive(mime, int(w.Fd())); err != nil {
++			w.Close()
++			r.Close()
++			return
++		}
++		w.Close()
++
++		go func() {
++			defer r.Close()
++			data, err := io.ReadAll(r)
++			if err != nil || len(data) == 0 {
++				return
++			}
++			fn(data, mime, mimes)
++		}()
++	})
++}
++
++// Run dispatches Wayland events until ctx is cancelled.
++func (cs *Session) Run(ctx context.Context) error {
++	for {
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		default:
++			if err := cs.s.ctx.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
++				return fmt.Errorf("set read deadline: %w", err)
++			}
++			if err := cs.s.ctx.Dispatch(); err != nil {
++				if isTimeoutError(err) {
++					continue
++				}
++				return fmt.Errorf("dispatch: %w", err)
++			}
++		}
++	}
++}
++
++// Take makes this session the selection owner and serves the given offers.
++// A previous source, if any, is released first.
++func (cs *Session) Take(offers []wlclipboard.Offer) error {
++	if len(offers) == 0 {
++		return fmt.Errorf("no offers to serve")
++	}
++
++	mgr, err := cs.s.requireDataControl()
++	if err != nil {
++		return err
++	}
++
++	source, err := mgr.CreateDataSource()
++	if err != nil {
++		return fmt.Errorf("create data source: %w", err)
++	}
++
++	offerData := make(map[string][]byte, len(offers))
++	for _, offer := range offers {
++		if err := source.Offer(offer.MimeType); err != nil {
++			source.Destroy()
++			return fmt.Errorf("offer %s: %w", offer.MimeType, err)
++		}
++		offerData[offer.MimeType] = offer.Data
++	}
++
++	timeout := cs.writeTimeout
++	source.SetSendHandler(func(e ext_data_control.ExtDataControlSourceV1SendEvent) {
++		data, ok := offerData[e.MimeType]
++		if !ok {
++			syscall.Close(e.Fd)
++			return
++		}
++		go writeSelection(e.Fd, data, timeout)
++	})
++
++	source.SetCancelledHandler(func(e ext_data_control.ExtDataControlSourceV1CancelledEvent) {
++		cs.sourceMutex.Lock()
++		if cs.source == source {
++			cs.source = nil
++			cs.owning = false
++		}
++		cs.sourceMutex.Unlock()
++	})
++
++	cs.sourceMutex.Lock()
++	prev := cs.source
++	cs.source = source
++	cs.owning = true
++	cs.sourceMutex.Unlock()
++
++	if err := cs.device.SetSelection(source); err != nil {
++		cs.sourceMutex.Lock()
++		if cs.source == source {
++			cs.source = nil
++			cs.owning = false
++		}
++		cs.sourceMutex.Unlock()
++		source.Destroy()
++		return fmt.Errorf("set selection: %w", err)
++	}
++
++	// No roundtrip here: Run() keeps a short read deadline on this connection,
++	// so a blocking roundtrip would return i/o timeout instead of waiting for
++	// the compositor. The compositor processes requests in order, so the new
++	// set_selection lands before the previous source is destroyed below.
++	if prev != nil {
++		go func() {
++			time.Sleep(200 * time.Millisecond)
++			prev.Destroy()
++		}()
++	}
++
++	return nil
++}
++
++// IsOwner reports whether this session currently owns the selection.
++func (cs *Session) IsOwner() bool {
++	cs.sourceMutex.Lock()
++	defer cs.sourceMutex.Unlock()
++	return cs.owning
++}
++
++// writeSelection answers a paste request. It runs in its own goroutine so a
++// receiver that never drains the pipe cannot stall the event loop.
++func writeSelection(fd int, data []byte, timeout time.Duration) {
++	_ = syscall.SetNonblock(fd, false)
++	file := os.NewFile(uintptr(fd), "clipboard-pipe")
++	defer file.Close()
++
++	_ = file.SetWriteDeadline(time.Now().Add(timeout))
++	_, _ = file.Write(data)
++}
++
++// Close releases the selection and the connection.
++func (cs *Session) Close() {
++	cs.sourceMutex.Lock()
++	source := cs.source
++	cs.source = nil
++	cs.owning = false
++	cs.sourceMutex.Unlock()
++
++	if source != nil {
++		source.Destroy()
++	}
++	if cs.device != nil {
++		cs.device.Destroy()
++	}
++	cs.s.Close()
++}
++
+diff --git a/core/internal/server/clipboard/manager.go b/core/internal/server/clipboard/manager.go
+index 0eb0c353b..1a8c13197 100644
+--- a/core/internal/server/clipboard/manager.go
++++ b/core/internal/server/clipboard/manager.go
+@@ -2,6 +2,7 @@ package clipboard
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"encoding/binary"
+ 	"errors"
+ 	"fmt"
+@@ -17,7 +18,6 @@ import (
+ 	"runtime/debug"
+ 	"slices"
+ 	"strings"
+-	"syscall"
+ 	"time"
+ 
+ 	"hash/fnv"
+@@ -109,9 +109,63 @@ func NewManager(wlCtx wlcontext.WaylandContext, config Config) (*Manager, error)
+ 		m.setupDataDeviceSync()
+ 	}
+ 
++	if !config.Disabled {
++		watchCtx, watchCancel := context.WithCancel(context.Background())
++		m.watcherCancel = watchCancel
++		m.watcherWg.Add(1)
++		go m.runSession(watchCtx)
++	}
++
+ 	return m, nil
+ }
+ 
++// runSession drives the private Wayland session that both records selections
++// and owns them when the user pastes from history.
++//
++// The shared wlcontext dispatcher never delivers ext_data_control selection
++// events to this manager: the device is created without error but no event
++// arrives on it, while a connection of our own does receive them. Watching and
++// owning on that one connection also lets IsOwner tell a compositor echo of our
++// own set_selection apart from a real copy, so restores are not re-recorded.
++func (m *Manager) runSession(ctx context.Context) {
++	defer m.watcherWg.Done()
++
++	cs, err := clipboardstore.OpenSession()
++	if err != nil {
++		log.Errorf("Clipboard session unavailable: %v", err)
++		return
++	}
++	defer cs.Close()
++
++	cs.SetSelectionHandler(func(data []byte, mimeType string, _ []string) {
++		if !m.alive {
++			return
++		}
++		cfg := m.getConfig()
++		if cfg.Disabled || m.db == nil {
++			return
++		}
++		if len(data) == 0 || int64(len(data)) > cfg.MaxEntrySize {
++			return
++		}
++		if len(bytes.TrimSpace(data)) == 0 {
++			return
++		}
++
++		m.storeClipboardEntry(data, mimeType, nil, "")
++		m.updateState()
++		m.notifySubscribers()
++	})
++
++	m.ownerLock.Lock()
++	m.session = cs
++	m.ownerLock.Unlock()
++
++	if err := cs.Run(ctx); err != nil && ctx.Err() == nil {
++		log.Errorf("Clipboard session stopped: %v", err)
++	}
++}
++
+ func openDB(path string) (*bolt.DB, error) {
+ 	db, err := tryOpenDB(path)
+ 	if err == nil {
+@@ -1183,7 +1237,21 @@ func (m *Manager) TouchEntry(id uint64) error {
+ 
+ 	entry.Timestamp = time.Now()
+ 
+-	if err := m.storeEntry(*entry); err != nil {
++	// Rewrite in place. Going through storeEntry would dedupe the row against
++	// itself, hand out a fresh sequence number and invalidate the id the UI is
++	// holding, so a paste right after a touch would target a row that is gone.
++	err = m.dbUpdate(func(tx *bolt.Tx) error {
++		b := tx.Bucket([]byte("clipboard"))
++		if b == nil {
++			return fmt.Errorf("clipboard bucket missing")
++		}
++		encoded, err := encodeEntry(*entry)
++		if err != nil {
++			return err
++		}
++		return b.Put(itob(id), encoded)
++	})
++	if err != nil {
+ 		return err
+ 	}
+ 
+@@ -1379,74 +1447,21 @@ func (m *Manager) SetClipboardEntry(entry *Entry) error {
+ 	return nil
+ }
+ 
+-const selectionWriteTimeout = 30 * time.Second
+-
+-// Runs off the shared dispatcher: a receiver that never drains its pipe
+-// would otherwise stall every Wayland event in the daemon.
+-func writeSelection(fd int, data []byte, timeout time.Duration) {
+-	_ = syscall.SetNonblock(fd, true)
+-	file := os.NewFile(uintptr(fd), "clipboard-pipe")
+-	defer file.Close()
+-
+-	_ = file.SetWriteDeadline(time.Now().Add(timeout))
+-	if _, err := file.Write(data); err != nil {
+-		log.Errorf("Failed to write clipboard data: %v", err)
+-	}
+-}
+-
+ // takeSelection makes the daemon the selection owner, serving the given
+ // offers until another client claims the clipboard.
+ func (m *Manager) takeSelection(offers []wlclipboard.Offer) {
+-	m.post(func() {
+-		if m.dataControlMgr == nil || m.dataDevice == nil {
+-			log.Error("Data control manager or device not initialized")
+-			return
+-		}
+-
+-		dataMgr := m.dataControlMgr.(*ext_data_control.ExtDataControlManagerV1)
++	m.ownerLock.Lock()
++	cs := m.session
++	m.ownerLock.Unlock()
+ 
+-		source, err := dataMgr.CreateDataSource()
+-		if err != nil {
+-			log.Errorf("Failed to create data source: %v", err)
+-			return
+-		}
+-
+-		offerData := make(map[string][]byte, len(offers))
+-		for _, offer := range offers {
+-			if err := source.Offer(offer.MimeType); err != nil {
+-				log.Errorf("Failed to offer %s: %v", offer.MimeType, err)
+-				return
+-			}
+-			offerData[offer.MimeType] = offer.Data
+-		}
+-
+-		source.SetSendHandler(func(e ext_data_control.ExtDataControlSourceV1SendEvent) {
+-			data, ok := offerData[e.MimeType]
+-			if !ok {
+-				syscall.Close(e.Fd)
+-				return
+-			}
+-			go writeSelection(e.Fd, data, selectionWriteTimeout)
+-		})
+-
+-		source.SetCancelledHandler(func(e ext_data_control.ExtDataControlSourceV1CancelledEvent) {
+-			m.ownerLock.Lock()
+-			m.isOwner = false
+-			m.ownerLock.Unlock()
+-		})
+-
+-		m.releaseCurrentSource()
+-		m.currentSource = source
+-
+-		m.ownerLock.Lock()
+-		m.isOwner = true
+-		m.ownerLock.Unlock()
++	if cs == nil {
++		log.Error("Clipboard session not ready")
++		return
++	}
+ 
+-		device := m.dataDevice.(*ext_data_control.ExtDataControlDeviceV1)
+-		if err := device.SetSelection(source); err != nil {
+-			log.Errorf("Failed to set selection: %v", err)
+-		}
+-	})
++	if err := cs.Take(offers); err != nil {
++		log.Errorf("Failed to take selection: %v", err)
++	}
+ }
+ 
+ func (m *Manager) CopyText(text string) error {
+@@ -1504,6 +1519,11 @@ func (m *Manager) Close() {
+ 	m.alive = false
+ 	close(m.stopChan)
+ 
++	if m.watcherCancel != nil {
++		m.watcherCancel()
++		m.watcherWg.Wait()
++	}
++
+ 	close(m.dirty)
+ 	m.notifierWg.Wait()
+ 
+diff --git a/core/internal/server/clipboard/types.go b/core/internal/server/clipboard/types.go
+index 195c0c6fa..558988418 100644
+--- a/core/internal/server/clipboard/types.go
++++ b/core/internal/server/clipboard/types.go
+@@ -1,6 +1,7 @@
+ package clipboard
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"os"
+ 	"path/filepath"
+@@ -11,6 +12,7 @@ import (
+ 	bolt "go.etcd.io/bbolt"
+ 
+ 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wlcontext"
++	clipboardstore "github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
+ 	wlclient "github.com/AvengeMedia/dankgo/wayland/client"
+ )
+ 
+@@ -156,6 +158,10 @@ type Manager struct {
+ 	notifierWg  sync.WaitGroup
+ 	lastState   *State
+ 
++	watcherWg     sync.WaitGroup
++	watcherCancel context.CancelFunc
++	session       *clipboardstore.Session
++
+ 	// lazily created by dbusConnForFlatpak under dbusConnMutex
+ 	dbusConn      *dbus.Conn
+ 	dbusConnMutex sync.Mutex
