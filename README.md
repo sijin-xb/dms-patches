@@ -1,6 +1,6 @@
 # dms-patches
 
-DankMaterialShell 的个人补丁集。基于 `v1.6.0-574-g5a480101c`。
+DankMaterialShell 的个人补丁集。基于 `v1.6.0-581-ga9dd3be40`。
 
 ## 补丁
 
@@ -38,7 +38,7 @@ DMS 的音量滑块在 10% 时实际输出 -60 dB，几乎无声。原因是 qui
 ```fish
 git clone https://github.com/AvengeMedia/DankMaterialShell
 cd DankMaterialShell
-git checkout 5a480101c
+git checkout a9dd3be40
 git submodule update --init --recursive
 ```
 

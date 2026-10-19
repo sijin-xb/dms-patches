@@ -519,3 +519,20 @@ index 195c0c6fa..558988418 100644
  	// lazily created by dbusConnForFlatpak under dbusConnMutex
  	dbusConn      *dbus.Conn
  	dbusConnMutex sync.Mutex
+diff --git a/quickshell/Services/ClipboardService.qml b/quickshell/Services/ClipboardService.qml
+index 630a68312..f5d77e406 100644
+--- a/quickshell/Services/ClipboardService.qml
++++ b/quickshell/Services/ClipboardService.qml
+@@ -119,9 +119,9 @@ Singleton {
+             (entry.pinned ? pinned : unpinned).push(entry);
+         }
+ 
+-        const byIdDesc = (a, b) => b.id - a.id;
+-        pinned.sort(byIdDesc);
+-        unpinned.sort(byIdDesc);
++        const byTimestampDesc = (a, b) => new Date(b.timestamp) - new Date(a.timestamp);
++        pinned.sort(byTimestampDesc);
++        unpinned.sort(byTimestampDesc);
+ 
+         pinnedEntries = pinned;
+         unpinnedEntries = unpinned;
