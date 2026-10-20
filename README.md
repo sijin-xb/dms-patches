@@ -31,6 +31,17 @@ DMS 的音量滑块在 10% 时实际输出 -60 dB，几乎无声。原因是 qui
 
 涉及文件：`core/internal/clipboard/{clipboard,session}.go`、`core/internal/server/clipboard/{manager,types}.go`。
 
+### 0003 — 壁纸缩放与窗口视差
+
+Scrolling 填充模式下新增两个设置：
+
+- `wallpaperZoom`（1.0–3.0，默认 1.0）：放大滚动画布，加宽视差行程。1.0 时与上游逐像素一致。
+- `wallpaperWindowParallax`（0–1.0，默认 0.25）：聚焦窗口在 niri 滚动布局中的列/行位置映射为壁纸偏移——最左列偏移 0，越靠右偏移越大；空 workspace 或视差关闭时归零。叠加在 workspace 滚动偏移之上，复用同一套 spring 动画与 shader 管线，shader 未改。
+
+设置 UI 在 Settings → Wallpaper 的 Fill mode 下方，仅 Scrolling 模式可见。
+
+涉及文件：`quickshell/Modules/WallpaperBackground.qml`、`quickshell/Common/SettingsData.qml`、`quickshell/Common/settings/SettingsSpec.js`、`quickshell/Modules/Settings/WallpaperColorsTab.qml`。
+
 ## 应用
 
 需要 DMS 源码树：

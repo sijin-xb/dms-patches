@@ -1,0 +1,276 @@
+diff --git a/quickshell/Common/SettingsData.qml b/quickshell/Common/SettingsData.qml
+index dc3eac63a..bf3d1d699 100644
+--- a/quickshell/Common/SettingsData.qml
++++ b/quickshell/Common/SettingsData.qml
+@@ -349,6 +349,10 @@ Singleton {
+     property real focusRingWidth: Spec.SPEC.focusRingWidth.def
+     property string focusRingColor: Spec.SPEC.focusRingColor.def
+     property string wallpaperFillMode: Spec.SPEC.wallpaperFillMode.def
++    property real wallpaperZoom: Spec.SPEC.wallpaperZoom.def
++    onWallpaperZoomChanged: saveSettings()
++    property real wallpaperWindowParallax: Spec.SPEC.wallpaperWindowParallax.def
++    onWallpaperWindowParallaxChanged: saveSettings()
+     property bool blurredWallpaperLayer: Spec.SPEC.blurredWallpaperLayer.def
+     property bool blurWallpaperOnOverview: Spec.SPEC.blurWallpaperOnOverview.def
+     property string wallpaperBackgroundColorMode: Spec.SPEC.wallpaperBackgroundColorMode.def
+diff --git a/quickshell/Common/settings/SettingsSpec.js b/quickshell/Common/settings/SettingsSpec.js
+index 200f90256..7472d0e8b 100644
+--- a/quickshell/Common/settings/SettingsSpec.js
++++ b/quickshell/Common/settings/SettingsSpec.js
+@@ -530,6 +530,18 @@ var LOCAL_SPEC = {
+     blurWallpaperOnOverview: {
+         def: false
+     },
++    wallpaperZoom: {
++        def: 1.0,
++        coerce: function (v) {
++            if (v === undefined || v === null)
++                return undefined;
++            return Math.min(3.0, Math.max(1.0, v));
++        }
++    },
++    wallpaperWindowParallax: {
++        def: 0.25,
++        coerce: Util.percentToUnit
++    },
+     systemTrayIconTintMode: {
+         def: "none"
+     },
+diff --git a/quickshell/Modules/Settings/WallpaperColorsTab.qml b/quickshell/Modules/Settings/WallpaperColorsTab.qml
+index 85ac28aab..c2fb1c590 100644
+--- a/quickshell/Modules/Settings/WallpaperColorsTab.qml
++++ b/quickshell/Modules/Settings/WallpaperColorsTab.qml
+@@ -420,6 +420,38 @@ Column {
+             }
+         }
+ 
++        SettingsSliderRow {
++            tab: "wallpaper"
++            tags: ["background", "zoom", "scale", "parallax", "scroll"]
++            settingKey: "wallpaperZoom"
++            text: I18n.tr("Zoom", "wallpaper zoom slider")
++            description: I18n.tr("Enlarge the scrolling canvas for more parallax travel", "wallpaper zoom slider description")
++            visible: root.wallpaperIsImage && (root.perMonitor ? SessionData.getMonitorWallpaperFillMode(root.selectedScreen) : SettingsData.wallpaperFillMode) === "Scrolling"
++            minimum: 100
++            maximum: 300
++            unit: "%"
++            value: Math.round(SettingsData.wallpaperZoom * 100)
++            modified: SettingsData.wallpaperZoom !== SettingsData.specDefault("wallpaperZoom")
++            onResetRequested: SettingsData.set("wallpaperZoom", SettingsData.specDefault("wallpaperZoom"))
++            onSliderValueChanged: newValue => SettingsData.set("wallpaperZoom", newValue / 100)
++        }
++
++        SettingsSliderRow {
++            tab: "wallpaper"
++            tags: ["background", "parallax", "window", "focus", "scroll"]
++            settingKey: "wallpaperWindowParallax"
++            text: I18n.tr("Window parallax", "wallpaper window parallax slider")
++            description: I18n.tr("Shift the wallpaper when windows open, close, or take focus", "wallpaper window parallax slider description")
++            visible: root.wallpaperIsImage && (root.perMonitor ? SessionData.getMonitorWallpaperFillMode(root.selectedScreen) : SettingsData.wallpaperFillMode) === "Scrolling"
++            minimum: 0
++            maximum: 100
++            unit: "%"
++            value: Math.round(SettingsData.wallpaperWindowParallax * 100)
++            modified: SettingsData.wallpaperWindowParallax !== SettingsData.specDefault("wallpaperWindowParallax")
++            onResetRequested: SettingsData.set("wallpaperWindowParallax", SettingsData.specDefault("wallpaperWindowParallax"))
++            onSliderValueChanged: newValue => SettingsData.set("wallpaperWindowParallax", newValue / 100)
++        }
++
+         ColorDropdownRow {
+             tab: "wallpaper"
+             tags: ["background", "color", "fill", "fit", "custom"]
+diff --git a/quickshell/Modules/WallpaperBackground.qml b/quickshell/Modules/WallpaperBackground.qml
+index 0dc9cedf5..2d5bd96eb 100644
+--- a/quickshell/Modules/WallpaperBackground.qml
++++ b/quickshell/Modules/WallpaperBackground.qml
+@@ -104,12 +104,74 @@ Variants {
+ 
+             property string scrollMode: SettingsData.wallpaperFillMode
+             property bool scrollingEnabled: scrollMode === "Scrolling"
++            property real wallpaperZoom: SettingsData.wallpaperZoom
++            onWallpaperZoomChanged: regenerate()
++            property real windowParallax: SettingsData.wallpaperWindowParallax
++            onWindowParallaxChanged: updateWindowParallax()
+             property int currentWorkspaceIndex: 0
+             property int totalWorkspaces: 1
+-            // Also requires the image to overflow on the compositor's scroll
+-            // axis — niri scrolls Y, Hyprland scrolls X — otherwise the
+-            // currentWallpaper Fill fallback handles it.
+-            property bool effectiveScrolling: scrollingEnabled && totalWorkspaces > 1 && (!imageMetrics.ready || (CompositorService.isNiri && imageMetrics.nativeWidth / imageMetrics.nativeHeight < root.textureWidth / root.textureHeight - 0.01) || (CompositorService.isHyprland && imageMetrics.nativeWidth / imageMetrics.nativeHeight > root.textureWidth / root.textureHeight + 0.01))
++            // Overflow is judged on the zoomed canvas, not the raw aspect:
++            // zoom > 1 widens the travel; at zoom 1.0 this matches upstream.
++            readonly property bool canvasOverflows: !imageMetrics.ready || imageMetrics.canvasHeight > root.textureHeight * 1.01 || imageMetrics.canvasWidth > root.textureWidth * 1.01
++            property bool effectiveScrolling: scrollingEnabled && (totalWorkspaces > 1 || (windowParallax > 0 && CompositorService.isNiri)) && canvasOverflows
++
++            // Window-driven parallax: the focused window's column/row in the
++            // scrolling layout maps to the offset — leftmost column is 0, each
++            // column to the right shifts further. Per-workspace by construction.
++            property real windowParallaxX: 0.0
++            property real windowParallaxY: 0.0
++
++            function updateWindowParallax() {
++                if (!effectiveScrolling || windowParallax <= 0 || !CompositorService.isNiri) {
++                    if (windowParallaxX !== 0 || windowParallaxY !== 0) {
++                        windowParallaxX = 0;
++                        windowParallaxY = 0;
++                        restartScrollAnim();
++                    }
++                    return;
++                }
++                const wid = NiriService.lastFocusedWindowId;
++                const wsWindows = NiriService.windows.filter(w => {
++                    const ws = NiriService.workspaces[w.workspace_id];
++                    return ws && ws.output === modelData.name && ws.is_active;
++                });
++                const focused = wsWindows.find(w => w.id === wid);
++                let tx = 0, ty = 0;
++                if (focused) {
++                    const cols = wsWindows.map(w => (w.layout?.pos_in_scrolling_layout?.[0]) ?? 1);
++                    const rows = wsWindows.map(w => (w.layout?.pos_in_scrolling_layout?.[1]) ?? 1);
++                    const minCol = Math.min(...cols), maxCol = Math.max(...cols);
++                    const minRow = Math.min(...rows), maxRow = Math.max(...rows);
++                    const col = focused.layout?.pos_in_scrolling_layout?.[0] ?? minCol;
++                    const row = focused.layout?.pos_in_scrolling_layout?.[1] ?? minRow;
++                    if (maxCol > minCol)
++                        tx = ((col - minCol) / (maxCol - minCol)) * 100.0 * windowParallax;
++                    if (maxRow > minRow)
++                        ty = ((row - minRow) / (maxRow - minRow)) * 100.0 * windowParallax;
++                }
++                if (Math.abs(tx - windowParallaxX) < 0.01 && Math.abs(ty - windowParallaxY) < 0.01)
++                    return;
++                windowParallaxX = tx;
++                windowParallaxY = ty;
++                restartScrollAnim();
++            }
++
++            function restartScrollAnim() {
++                if (effectiveScrolling)
++                    scrollAnim.startAnimation(scrollAnim.baseTargetX + windowParallaxX, scrollAnim.baseTargetY + windowParallaxY);
++            }
++
++            Connections {
++                target: CompositorService.isNiri ? NiriService : null
++                enabled: CompositorService.isNiri && root.effectiveScrolling && root.windowParallax > 0
++
++                function onLastFocusedWindowIdChanged() {
++                    root.updateWindowParallax();
++                }
++                function onWindowsChanged() {
++                    root.updateWindowParallax();
++                }
++            }
+ 
+             Connections {
+                 target: SessionData
+@@ -128,6 +190,7 @@ Variants {
+ 
+                 function onAllWorkspacesChanged() {
+                     root.updateWorkspaceData();
++                    root.updateWindowParallax();
+                 }
+             }
+ 
+@@ -450,7 +513,9 @@ Variants {
+                     newTargetX = scrollPercent;
+                 }
+ 
+-                scrollAnim.startAnimation(newTargetX, newTargetY);
++                scrollAnim.baseTargetX = newTargetX;
++                scrollAnim.baseTargetY = newTargetY;
++                scrollAnim.startAnimation(newTargetX + root.windowParallaxX, newTargetY + root.windowParallaxY);
+             }
+ 
+             property bool firstScrollUpdate: true
+@@ -462,6 +527,10 @@ Variants {
+                 property real startY: 0.0
+                 property real targetX: 0.0
+                 property real targetY: 0.0
++                // Workspace-driven share of the target; windowParallaxX/Y is
++                // added on top by callers.
++                property real baseTargetX: 0.0
++                property real baseTargetY: 0.0
+ 
+                 property real damping: CompositorService.isNiri ? 63.25 : 89.44
+                 property real stiffness: CompositorService.isNiri ? 1000.0 : 2000.0
+@@ -583,6 +652,7 @@ Variants {
+ 
+                 if (scrollingEnabled) {
+                     updateWorkspaceData();
++                    Qt.callLater(updateWindowParallax);
+                 }
+ 
+                 Qt.callLater(publishScrollPosition);
+@@ -613,6 +683,7 @@ Variants {
+ 
+             onEffectiveScrollingChanged: {
+                 publishScrollPosition();
++                updateWindowParallax();
+             }
+ 
+             onSourceChanged: {
+@@ -678,6 +749,10 @@ Variants {
+                 scrollAnim.startY = 0.0;
+                 scrollAnim.targetX = 0.0;
+                 scrollAnim.targetY = 0.0;
++                scrollAnim.baseTargetX = 0.0;
++                scrollAnim.baseTargetY = 0.0;
++                windowParallaxX = 0.0;
++                windowParallaxY = 0.0;
+             }
+ 
+             function startTransition() {
+@@ -792,28 +867,25 @@ Variants {
+                     nativeHeight = 0;
+                 }
+ 
++                // Zoom (>= 1.0) enlarges the canvas beyond the base cover
++                // size, widening the parallax travel on the scroll axis.
++                // Clamped to maxTextureSize — srcParallax allocates one texture.
+                 readonly property real canvasWidth: {
+-                    if (!ready || !root.effectiveScrolling)
++                    if (!ready)
+                         return root.textureWidth;
+                     const imageAspect = nativeWidth / nativeHeight;
+                     const screenAspect = root.textureWidth / root.textureHeight;
+-                    if (imageAspect < screenAspect) {
+-                        return root.textureWidth;
+-                    } else {
+-                        return root.textureHeight * imageAspect;
+-                    }
++                    const base = imageAspect < screenAspect ? root.textureWidth : root.textureHeight * imageAspect;
++                    return Math.min(base * root.wallpaperZoom, root.maxTextureSize);
+                 }
+ 
+                 readonly property real canvasHeight: {
+-                    if (!ready || !root.effectiveScrolling)
++                    if (!ready)
+                         return root.textureHeight;
+                     const imageAspect = nativeWidth / nativeHeight;
+                     const screenAspect = root.textureWidth / root.textureHeight;
+-                    if (imageAspect < screenAspect) {
+-                        return root.textureWidth / imageAspect;
+-                    } else {
+-                        return root.textureHeight;
+-                    }
++                    const base = imageAspect < screenAspect ? root.textureWidth / imageAspect : root.textureHeight;
++                    return Math.min(base * root.wallpaperZoom, root.maxTextureSize);
+                 }
+             }
+ 
+diff --git a/quickshell/Services/ClipboardService.qml b/quickshell/Services/ClipboardService.qml
+index 630a68312..f5d77e406 100644
+--- a/quickshell/Services/ClipboardService.qml
++++ b/quickshell/Services/ClipboardService.qml
+@@ -119,9 +119,9 @@ Singleton {
+             (entry.pinned ? pinned : unpinned).push(entry);
+         }
+ 
+-        const byIdDesc = (a, b) => b.id - a.id;
+-        pinned.sort(byIdDesc);
+-        unpinned.sort(byIdDesc);
++        const byTimestampDesc = (a, b) => new Date(b.timestamp) - new Date(a.timestamp);
++        pinned.sort(byTimestampDesc);
++        unpinned.sort(byTimestampDesc);
+ 
+         pinnedEntries = pinned;
+         unpinnedEntries = unpinned;
